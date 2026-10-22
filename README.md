@@ -8,18 +8,46 @@ simulator (generator) ──▶ bounded queue.Queue ──▶ consumer ──▶
  dup + out-of-order events                        assembly, metrics       driver_shifts, metrics_zone_hour
 ```
 
-## Quick start (Windows)
+## Quick start
+
+Requires Python 3.11+.
 
 ```powershell
 py -3.13 -m venv .venv
-.\.venv\Scripts\pip install -r requirements.txt
-$env:PYTHONPATH = "src"
-.\.venv\Scripts\python -m delivery_ops.cli run --days 7        # ~7 s
-.\.venv\Scripts\streamlit run dashboard/app.py
-.\.venv\Scripts\python -m pytest
+.\.venv\Scripts\pip install -e ".[dev]"
+.\.venv\Scripts\delivery-ops run --days 7        # simulate + run the pipeline (~7 s)
+.\.venv\Scripts\streamlit run dashboard/app.py   # open the dashboard
+.\.venv\Scripts\python -m pytest                 # tests
 ```
 
-Live mode: run the CLI with `--throttle 0.002` and turn on **Live refresh** in the dashboard sidebar.
+macOS/Linux: same commands with `python -m venv .venv`, `source .venv/bin/activate` and no `.exe`/backslashes.
+
+Live mode: run `delivery-ops run --throttle 0.002` and turn on **Live refresh** in the dashboard sidebar.
+
+## Results (7 simulated days, seed 42)
+
+![Overview](docs/dashboard-overview.jpg)
+
+40,392 events (399 duplicates dropped) became 6,710 orders. Headline numbers:
+
+| | |
+|---|---|
+| SLA breach rate | 32.3% |
+| ETA error (MAE) | 9.6 min (quoted ETAs run 5.8 min optimistic on average) |
+| ETA within ±5 min | 43% |
+| Driver utilization | 59% overall, 100% in peak hours |
+
+What the data shows:
+- **Dinner is the worst window.** North Hub at 20:00 breaches the SLA on 99% of orders with 100% utilization and a 29 min average wait for a driver. Zone-hours at 20:00-21:00 dominate the top of the bottleneck table.
+- **Lunch hurts in Tech Park and Harbor** (13:00, 86-93% breach). Tech Park has the strongest lunch demand; Harbor has the fewest drivers.
+- **ETA error tracks load.** MAE is about 5 min off-peak and 20-30 min in the worst zone-hours, because the quoted ETA ignores driver queueing and traffic.
+- Capacity is the cause, not demand alone: the staggered shifts leave only a third of drivers online after 20:00.
+
+![Heatmaps](docs/dashboard-heatmaps.jpg)
+![Top bottlenecks](docs/dashboard-bottlenecks.jpg)
+![Late orders map](docs/dashboard-map.jpg)
+
+> The data is **simulated**; the numbers come from the assumptions in `config.py`, not from a real fleet.
 
 ## Event stream
 `ORDER_PLACED → DRIVER_ASSIGNED → PICKED_UP → IN_TRANSIT (GPS ping every 4 min) → DELIVERED`, plus

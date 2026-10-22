@@ -1,4 +1,4 @@
-﻿"""Streamlit dashboard: peak-hour bottlenecks by zone/hour.
+"""Streamlit dashboard: peak-hour bottlenecks by zone/hour.
 
 Run:  streamlit run dashboard/app.py
 """
@@ -44,7 +44,7 @@ def heatmap(df: pd.DataFrame, value: str, title: str, fmt: str, zmax: float | No
     pv = df.pivot(index="zone", columns="hour", values=value).reindex(columns=range(8, 24))
     fig = go.Figure(go.Heatmap(
         z=pv.values, x=[f"{h:02d}" for h in pv.columns], y=pv.index, colorscale=HEAT, zmin=0, zmax=zmax,
-        xgap=2, ygap=2, hovertemplate="%{y} Â· %{x}:00<br>" + title + ": %{z:" + fmt + "}<extra></extra>",
+        xgap=2, ygap=2, hovertemplate="%{y} · %{x}:00<br>" + title + ": %{z:" + fmt + "}<extra></extra>",
         colorbar=dict(thickness=10, tickformat=fmt)))
     fig.update_layout(title=title, height=300, margin=dict(l=0, r=0, t=40, b=0),
                       xaxis_title="Hour of day", yaxis=dict(autorange="reversed"))
@@ -65,8 +65,8 @@ def render(db_path: str) -> None:
         sel_dates = st.select_slider("Dates", options=dates, value=(dates[0], dates[-1]))
         zones = sorted(zh["zone"].unique())
         sel_zones = st.multiselect("Zones", zones, default=zones)
-        st.caption(f"SLA = delivered â‰¤ {SLA_MINUTES} min after order Â· "
-                   f"ETA 'accurate' = within Â±{ETA_TOLERANCE_MIN} min")
+        st.caption(f"SLA = delivered ≤ {SLA_MINUTES} min after order · "
+                   f"ETA 'accurate' = within ±{ETA_TOLERANCE_MIN} min")
         if stats:
             st.caption(f"Pipeline: {int(stats['received']):,} events, "
                        f"{int(stats['duplicates']):,} duplicates dropped, "
@@ -81,43 +81,39 @@ def render(db_path: str) -> None:
     by_hour = rollup(f, ["hour"])
     scores = bottleneck_scores(f)
 
-    st.title("Delivery operations â€” peak-hour bottlenecks")
+    st.title("Delivery operations — peak-hour bottlenecks")
     c = st.columns(5)
     c[0].metric("Orders", f"{int(total.orders):,}")
     c[1].metric("SLA breach rate", f"{total.sla_breach_rate:.1%}")
     c[2].metric("ETA error (MAE)", f"{total.eta_mae_min:.1f} min", f"bias {total.eta_bias_min:+.1f} min",
                 delta_color="off")
-    c[3].metric("ETA within Â±5 min", f"{total.eta_within_tol_rate:.0%}")
+    c[3].metric("ETA within ±5 min", f"{total.eta_within_tol_rate:.0%}")
     c[4].metric("Driver utilization", f"{total.driver_utilization:.0%}")
 
     hot = scores[scores["bottleneck_score"] >= BOTTLENECK_THRESHOLD]
     if len(hot):
         worst = hot.iloc[0]
-        st.error(f"**{len(hot)} bottleneck zone-hours** (score â‰¥ {BOTTLENECK_THRESHOLD}). "
-                 f"Worst: **{worst.zone} at {int(worst.hour):02d}:00** â€” "
+        st.error(f"**{len(hot)} bottleneck zone-hours** (score ≥ {BOTTLENECK_THRESHOLD}). "
+                 f"Worst: **{worst.zone} at {int(worst.hour):02d}:00** — "
                  f"{worst.sla_breach_rate:.0%} SLA breaches, {worst.driver_utilization:.0%} utilization, "
                  f"{worst.avg_dispatch_wait_min:.0f} min avg dispatch wait.")
     else:
         st.success("No bottleneck zone-hours in this selection.")
 
-    # Demand vs supply: the story behind the heatmaps
-    st.subheader("Demand vs. driver supply, by hour")
+    st.subheader("Demand and SLA breaches, by hour")
     days = max(f["date"].nunique(), 1)
-    fig = go.Figure()
-    fig.add_bar(x=by_hour["hour"], y=by_hour["orders"] / days, name="Orders / day", marker_color=BLUE,
-                hovertemplate="%{x}:00 â€” %{y:.0f} orders/day<extra></extra>")
-    fig.add_scatter(x=by_hour["hour"], y=by_hour["sla_breach_rate"] * 100, name="SLA breach %",
-                    mode="lines+markers", line=dict(color=BAD, width=2), yaxis="y2",
-                    hovertemplate="%{x}:00 â€” %{y:.0f}% breached<extra></extra>")
-    fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0), xaxis=dict(title="Hour", dtick=1),
-                      yaxis=dict(title="Orders per day"),
-                      yaxis2=dict(title="SLA breach %", overlaying="y", side="right", range=[0, 100],
-                                  showgrid=False),
-                      legend=dict(orientation="h", y=1.1))
-    st.plotly_chart(fig, width="stretch")
-    st.caption("Two scales on one chart for orientation only; read exact values from the heatmaps below.")
+    left, right = st.columns(2)
+    for col, y, title, color, fmt in [
+        (left, by_hour["orders"] / days, "Orders per day", BLUE, ".0f"),
+        (right, by_hour["sla_breach_rate"], "SLA breach rate", BAD, ".0%"),
+    ]:
+        fig = go.Figure(go.Bar(x=by_hour["hour"], y=y, marker_color=color,
+                               hovertemplate="%{x}:00 — %{y:" + fmt + "}<extra></extra>"))
+        fig.update_layout(title=title, height=300, margin=dict(l=0, r=0, t=40, b=0),
+                          xaxis=dict(title="Hour of day", dtick=1), yaxis=dict(tickformat=fmt))
+        col.plotly_chart(fig, width="stretch")
 
-    st.subheader("Zone Ã— hour")
+    st.subheader("Zone × hour")
     a, b = st.columns(2)
     a.plotly_chart(heatmap(by_zh, "sla_breach_rate", "SLA breach rate", ".0%", 1.0), width="stretch")
     b.plotly_chart(heatmap(by_zh, "driver_utilization", "Driver utilization", ".0%", 1.0), width="stretch")
@@ -139,7 +135,7 @@ def render(db_path: str) -> None:
                        "dispatch wait (min)": st.column_config.NumberColumn(format="%.1f"),
                        "ETA MAE (min)": st.column_config.NumberColumn(format="%.1f"),
                        "score": st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.2f")})
-    st.caption("score = 0.4Â·utilization + 0.4Â·breach rate + 0.2Â·(dispatch wait Ã· 15 min), each capped at 1.")
+    st.caption("score = 0.4·utilization + 0.4·breach rate + 0.2·(dispatch wait ÷ 15 min), each capped at 1.")
 
     st.subheader("Where late orders originate")
     o = orders[orders["zone"].isin(sel_zones)].copy()
@@ -150,7 +146,8 @@ def render(db_path: str) -> None:
     late = o[o["late"]]
     if len(late):
         sample = late.sample(min(len(late), 3000), random_state=0)
-        m = px.scatter_map(sample, lat="pickup_lat", lon="pickup_lon", color="zone", zoom=11, height=420,
+        m = px.scatter_map(sample, lat="pickup_lat", lon="pickup_lon", color="zone", zoom=11.3, height=420,
+                           center={"lat": sample["pickup_lat"].mean(), "lon": sample["pickup_lon"].mean()},
                            opacity=0.6, hover_data={"pickup_lat": False, "pickup_lon": False})
         m.update_layout(map_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0),
                         legend=dict(orientation="h", y=1.02))
