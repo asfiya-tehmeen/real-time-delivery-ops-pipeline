@@ -2,6 +2,7 @@
 
 Run:  streamlit run dashboard/app.py
 """
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -12,10 +13,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from delivery_ops.config import ETA_TOLERANCE_MIN, SLA_MINUTES  # noqa: E402
+from delivery_ops.config import ETA_TOLERANCE_MIN, SLA_MINUTES, ZONES  # noqa: E402
 from delivery_ops.metrics import ADDITIVE, bottleneck_scores, rollup  # noqa: E402
 
-DEFAULT_DB = Path(__file__).resolve().parents[1] / "data" / "delivery_ops.db"
+DEFAULT_DB = Path(os.environ.get("DELIVERY_OPS_DB",
+                                  Path(__file__).resolve().parents[1] / "data" / "delivery_ops.db"))
 BLUE = "#2a6fb0"        # volume / supply
 HEAT = "Blues"          # single-hue sequential: darker = more
 BAD = "#c8442b"         # reserved for "problem" marks
@@ -24,20 +26,19 @@ BOTTLENECK_THRESHOLD = 0.7
 st.set_page_config(page_title="Delivery Ops", layout="wide")
 
 
-@st.cache_resource
-def _conn(path: str) -> sqlite3.Connection:
-    return sqlite3.connect(path, check_same_thread=False)
-
-
 def load(path: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    conn = _conn(path)
-    zh = pd.read_sql("SELECT * FROM metrics_zone_hour", conn)
-    breached = pd.read_sql(
-        "SELECT zone, pickup_lat, pickup_lon, status, placed_ts, delivered_ts, quoted_eta_min "
-        "FROM fact_orders", conn)
-    stats = dict(pd.read_sql("SELECT key, value FROM pipeline_stats", conn).values) if \
-        conn.execute("SELECT COUNT(*) FROM pipeline_stats").fetchone()[0] else {}
-    return zh, breached, stats
+    # Short-lived connection: a long-lived one would lock the file on Windows and stop the
+    # pipeline from resetting the database while the dashboard is open.
+    conn = sqlite3.connect(path, timeout=30)
+    try:
+        zh = pd.read_sql("SELECT * FROM metrics_zone_hour", conn)
+        orders = pd.read_sql(
+            "SELECT zone, pickup_lat, pickup_lon, status, placed_ts, delivered_ts, quoted_eta_min "
+            "FROM fact_orders", conn)
+        stats = dict(pd.read_sql("SELECT key, value FROM pipeline_stats", conn).values)
+    finally:
+        conn.close()
+    return zh, orders, stats
 
 
 def heatmap(df: pd.DataFrame, value: str, title: str, fmt: str, zmax: float | None = None) -> go.Figure:
@@ -51,28 +52,22 @@ def heatmap(df: pd.DataFrame, value: str, title: str, fmt: str, zmax: float | No
     return fig
 
 
-def render(db_path: str) -> None:
+def render(db_path: str, date_range: tuple[str, str] | None, zone_filter: list[str]) -> None:
+    """Draw the dashboard body. Sidebar widgets must live outside this function: Streamlit
+    forbids them inside a fragment, and live mode re-runs this as a fragment."""
     if not Path(db_path).exists():
-        st.error(f"No database at {db_path}. Run: python -m delivery_ops.cli run --days 7")
+        st.error(f"No database at {db_path}. Run: delivery-ops run --days 7")
         return
     zh, orders, stats = load(db_path)
     if zh.empty:
         st.info("Waiting for the pipeline to produce metrics...")
         return
 
-    with st.sidebar:
-        dates = sorted(zh["date"].unique())
-        sel_dates = st.select_slider("Dates", options=dates, value=(dates[0], dates[-1]))
-        zones = sorted(zh["zone"].unique())
-        sel_zones = st.multiselect("Zones", zones, default=zones)
-        st.caption(f"SLA = delivered ≤ {SLA_MINUTES} min after order · "
-                   f"ETA 'accurate' = within ±{ETA_TOLERANCE_MIN} min")
-        if stats:
-            st.caption(f"Pipeline: {int(stats['received']):,} events, "
-                       f"{int(stats['duplicates']):,} duplicates dropped, "
-                       f"{int(stats['orders_closed']):,} orders closed")
-
-    f = zh[(zh["date"] >= sel_dates[0]) & (zh["date"] <= sel_dates[1]) & zh["zone"].isin(sel_zones)]
+    f = zh
+    if date_range:
+        f = f[(f["date"] >= date_range[0]) & (f["date"] <= date_range[1])]
+    if zone_filter:
+        f = f[f["zone"].isin(zone_filter)]
     if f.empty:
         st.warning("No data for this selection.")
         return
@@ -138,10 +133,12 @@ def render(db_path: str) -> None:
     st.caption("score = 0.4·utilization + 0.4·breach rate + 0.2·(dispatch wait ÷ 15 min), each capped at 1.")
 
     st.subheader("Where late orders originate")
-    o = orders[orders["zone"].isin(sel_zones)].copy()
+    o = orders[orders["zone"].isin(zone_filter)].copy() if zone_filter else orders.copy()
     o["placed_ts"] = pd.to_datetime(o["placed_ts"])
     o["delivered_ts"] = pd.to_datetime(o["delivered_ts"])
-    o = o[(o["placed_ts"].dt.date.astype(str) >= sel_dates[0]) & (o["placed_ts"].dt.date.astype(str) <= sel_dates[1])]
+    if date_range:
+        day = o["placed_ts"].dt.date.astype(str)
+        o = o[(day >= date_range[0]) & (day <= date_range[1])]
     o["late"] = (o["status"] != "DELIVERED") | ((o["delivered_ts"] - o["placed_ts"]).dt.total_seconds() / 60 > SLA_MINUTES)
     late = o[o["late"]]
     if len(late):
@@ -155,13 +152,35 @@ def render(db_path: str) -> None:
         st.caption(f"{len(late):,} late or cancelled orders (map shows up to 3,000), by restaurant location.")
     else:
         st.caption("No late orders in this selection.")
+    if stats:
+        st.caption(f"Pipeline: {int(stats['received']):,} events, {int(stats['duplicates']):,} duplicates "
+                   f"dropped, {int(stats['orders_closed']):,} orders closed")
+
+
+def available_dates(path: str) -> list[str]:
+    if not Path(path).exists():
+        return []
+    conn = sqlite3.connect(path, timeout=30)
+    try:
+        return sorted(pd.read_sql("SELECT DISTINCT date FROM metrics_zone_hour", conn)["date"])
+    except Exception:
+        return []     # database exists but the pipeline hasn't written metrics yet
+    finally:
+        conn.close()
 
 
 st.sidebar.header("Controls")
 db_path = st.sidebar.text_input("Database", str(DEFAULT_DB))
 live = st.sidebar.toggle("Live refresh (follow a running pipeline)", value=False)
+dates = available_dates(db_path)
+date_range = None
+if len(dates) > 1:
+    picked = st.sidebar.select_slider("Dates", options=dates, value=(dates[0], dates[-1]))
+    date_range = None if picked == (dates[0], dates[-1]) else picked   # full range = "follow latest"
+zone_filter = st.sidebar.multiselect("Zones (empty = all)", [z.name for z in ZONES])
+st.sidebar.caption(f"SLA = delivered ≤ {SLA_MINUTES} min after order · "
+                   f"ETA 'accurate' = within ±{ETA_TOLERANCE_MIN} min")
 if live:
-    st.fragment(run_every=3)(render)(db_path)
+    st.fragment(run_every=3)(render)(db_path, date_range, zone_filter)
 else:
-    render(db_path)
-
+    render(db_path, date_range, zone_filter)

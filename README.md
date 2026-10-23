@@ -8,6 +8,8 @@ simulator (generator) ──▶ bounded queue.Queue ──▶ consumer ──▶
  dup + out-of-order events                        assembly, metrics       driver_shifts, metrics_zone_hour
 ```
 
+![Demo: the dashboard following a live pipeline run](docs/demo.gif)
+
 ## Quick start
 
 Requires Python 3.11+.
